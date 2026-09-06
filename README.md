@@ -21,17 +21,17 @@
    
 3. Установите зависимости:
    ```bash
-    pip install -r requirements.txt
+   pip install -r requirements.txt
    ```
    
 5. Создайте конфиг на основе примера:
    ```bash
-    cp example.config.py config.py
+   cp example.config.py config.py
    nano config.py
    ```
     Укажите в config.py свой JID, пароль и API-ключ Gemini.
 
 7. Запуск:
    ```bash
-    python gemini.py
+   python gemini.py
    ```
