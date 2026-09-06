@@ -14,15 +14,24 @@
 ## Установка и запуск
 
 1. Склонируйте репозиторий и перейдите в папку:
+   ```bash
    git clone [https://github.com/manazius/xgemini.git](https://github.com/manazius/xgemini.git)
    cd xgemini
+   ```
    
-2. Установите зависимости:
+3. Установите зависимости:
+   ```bash
     pip install -r requirements.txt
-
-3. Создайте конфиг на основе примера:
+   ```
+   
+5. Создайте конфиг на основе примера:
+   ```bash
     cp example.config.py config.py
+   nano config.py
+   ```bash
     Укажите в config.py свой JID, пароль и API-ключ Gemini.
 
-4. Запуск:
+7. Запуск:
+   ```bash
     python gemini.py
+   ```
