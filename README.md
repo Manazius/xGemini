@@ -15,7 +15,7 @@
 
 1. Склонируйте репозиторий и перейдите в папку:
    ```bash
-   git clone [https://github.com/manazius/xgemini.git](https://github.com/manazius/xgemini.git)
+   git clone https://github.com/manazius/xgemini.git
    cd xgemini
    ```
    
