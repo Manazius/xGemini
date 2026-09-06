@@ -28,7 +28,7 @@
    ```bash
     cp example.config.py config.py
    nano config.py
-   ```bash
+   ```
     Укажите в config.py свой JID, пароль и API-ключ Gemini.
 
 7. Запуск:
