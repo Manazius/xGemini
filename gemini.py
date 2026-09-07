@@ -1,108 +1,159 @@
 import asyncio
 import logging
+import re
+import sys
+from slixmpp import ClientXMPP
 from google import genai
 from google.genai import types
-import config
-import slixmpp
 
-# Настройка системного логирования
+import config
+
+# Логирование
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S"
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
+logger = logging.getLogger("xgemini")
+
+# Настройки из config.py с дефолтными значениями на случай отсутствия
+JID = config.JID
+PASSWORD = config.PASSWORD
+ALLOWED_JIDS = set(getattr(config, "ALLOWED_JIDS", []))
+GEMINI_API_KEY = config.GEMINI_API_KEY
+GEMINI_MODEL = getattr(config, "GEMINI_MODEL", "gemini-2.5-flash-lite")
+TEMPERATURE = getattr(config, "TEMPERATURE", 0.8)
+SYSTEM_PROMPT = getattr(
+    config,
+    "SYSTEM_PROMPT",
+    "Ты остроумный и прямой собеседник в Jabber/XMPP. "
+    "Общайся неформально, на равных, без корпоративных клише. "
+    "Форматирование: чистый plain text без Markdown."
 )
 
-gemini_client = genai.Client(api_key=config.GEMINI_API_KEY)
+
+def clean_markdown(text: str) -> str:
+    """Удаляет базовые маркеры Markdown для чистого отображения в Jabber."""
+    if not text:
+        return ""
+    # Удаляем жирный и курсив (* или _)
+    text = re.sub(r"(\*\*|__)(.*?)\1", r"\2", text)
+    text = re.sub(r"(\*|_)(.*?)\1", r"\2", text)
+    # Удаляем инлайн-код `code`
+    text = re.sub(r"`(.*?)`", r"\1", text)
+    # Удаляем блоки кода ```code```
+    text = re.sub(r"```.*?\n(.*?)```", r"\1", text, flags=re.DOTALL)
+    # Удаляем заголовки #
+    text = re.sub(r"^#{1,6}\s+", "", text, flags=re.MULTILINE)
+    return text.strip()
 
 
-class GeminiXmppBot(slixmpp.ClientXMPP):
+class GeminiBot(ClientXMPP):
+    def __init__(self, jid: str, password: str):
+        super().__init__(jid, password)
 
-  def __init__(self, jid, password):
-    super().__init__(jid, password)
-    self.add_event_handler("session_start", self.start)
-    self.add_event_handler("message", self.message)
-    self.chats = {}
+        # Регистрация плагинов XMPP
+        self.register_plugin("xep_0030")  # Service Discovery
+        self.register_plugin("xep_0199")  # XMPP Ping (keep-alive)
+        self.register_plugin("xep_0085")  # Chat State Notifications (composing...)
 
-  async def start(self, event):
-    self.send_presence()
-    await self.get_roster()
-    logging.info(f"Бот успешно подключен как {self.boundjid.bare}")
+        # Обработчики событий
+        self.add_event_handler("session_start", self.start)
+        self.add_event_handler("message", self.message)
 
-  async def message(self, msg):
-    if msg["type"] in ("chat", "normal") and msg["body"]:
-      user_message = msg["body"]
-      sender_jid = msg["from"].bare
-
-      # 1. Белый список: игнорируем всех, кого нет в ALLOWED_JIDS
-      if getattr(config, "ALLOWED_JIDS", None) and sender_jid not in config.ALLOWED_JIDS:
-        logging.warning(f"Отклонено сообщение от неизвестного JID: {sender_jid}")
-        return
-
-      # 2. Команда очистки контекста
-      if user_message.strip().lower() in ("/clear", "!clear", "сброс", "!reset"):
-        self.chats.pop(sender_jid, None)
-        self.send_message(mto=msg["from"], mbody="Контекст очищен. Начнем с чистого листа!", mtype=msg["type"])
-        logging.info(f"Контекст очищен для пользователя {sender_jid}")
-        return
-
-      # Инициализация сессии для нового пользователя
-      if sender_jid not in self.chats:
-        model_name = getattr(config, "GEMINI_MODEL")
-
-        self.chats[sender_jid] = gemini_client.aio.chats.create(
-            model=model_name,
-            config=types.GenerateContentConfig(
-                system_instruction=(
-                    "Ты — ассистент в простом текстовом XMPP-мессенджере. "
-                    "1. Категорически запрещено использовать любую Markdown-разметку "
-                    "для форматирования текста (никаких звездочек ** для жирного, "
-                    "никаких решеток для заголовков и т.д.). Пиши только чистый текст. "
-                    "2. Не генерируй и не пытайся создавать изображения, видео "
-                    "или иные медиафайлы, отвечай исключительно текстом."
-                )
-            ),
+        # Клиент Google GenAI
+        self.ai_client = genai.Client(api_key=GEMINI_API_KEY)
+        self.generation_config = types.GenerateContentConfig(
+            system_instruction=SYSTEM_PROMPT,
+            temperature=TEMPERATURE,
         )
 
-      chat_session = self.chats[sender_jid]
+        # Сессии чатов для каждого JID: {bare_jid: chat_instance}
+        self.chats = {}
 
-      # 3. Отправляем статус "Печатает..." (composing)
-      typing_msg = self.make_message(mto=msg["from"], mtype=msg["type"])
-      typing_msg["chat_state"] = "composing"
-      typing_msg.send()
+    async def start(self, event):
+        self.send_presence()
+        await self.get_roster()
+        logger.info("Бот успешно подключился к XMPP-серверу под JID: %s", self.boundjid.bare)
 
-      # Запрашиваем ответ у Google
-      try:
-        response = await chat_session.send_message(user_message)
-        reply_text = response.text if response.text else "Пустой ответ."
-      except ValueError as e:
-        # 4. Перехват ошибки цензуры Google (Safety Settings)
-        reply_text = "⚠️ Ответ заблокирован внутренними фильтрами безопасности Google."
-        logging.warning(f"Блокировка контента для {sender_jid}: {e}")
-      except Exception as e:
-        # Логируем любые другие ошибки с полным трейсбеком
-        reply_text = f"Ошибка при вызове API: {e}"
-        logging.error(f"Ошибка API при обработке сообщения от {sender_jid}:", exc_info=True)
+        # Включаем периодический keepalive пинг каждые 60 секунд
+        self["xep_0199"].enable_keepalive(interval=60, timeout=20)
 
-      # Убираем статус "Печатает..." и отправляем сам текст
-      reply_msg = self.make_message(mto=msg["from"], mtype=msg["type"])
-      reply_msg["chat_state"] = "active"
-      reply_msg["body"] = reply_text
-      reply_msg.send()
+    def get_or_create_chat(self, bare_jid: str):
+        if bare_jid not in self.chats:
+            logger.info("Создание новой сессии диалога для: %s", bare_jid)
+            self.chats[bare_jid] = self.ai_client.aio.chats.create(
+                model=GEMINI_MODEL,
+                config=self.generation_config
+            )
+        return self.chats[bare_jid]
+
+    def reset_chat(self, bare_jid: str):
+        if bare_jid in self.chats:
+            del self.chats[bare_jid]
+            logger.info("Контекст диалога сброшен для: %s", bare_jid)
+
+    async def message(self, msg):
+        # Реагируем только на личные сообщения (chat) и обычные без явного типа
+        if msg["type"] not in ("chat", "normal"):
+            return
+
+        body = (msg["body"] or "").strip()
+        if not body:
+            return
+
+        sender_bare = msg["from"].bare
+
+        # Проверка белого списка (если он задан)
+        if ALLOWED_JIDS and sender_bare not in ALLOWED_JIDS:
+            logger.warning("Отклонено сообщение от неавторизованного JID: %s", sender_bare)
+            return
+
+        # Команды сброса контекста
+        if body.lower() in ("!clear", "/clear", "сброс", "забудь"):
+            self.reset_chat(sender_bare)
+            msg.reply("Контекст диалога очищен. О чем поговорим?").send()
+            return
+
+        # Отправляем статус "Печатает..." отдельным пакетом перед запросом к API
+        typing_msg = self.make_message(mto=msg["from"], mtype=msg["type"])
+        typing_msg["chat_state"] = "composing"
+        typing_msg.send()
+
+        try:
+            chat = self.get_or_create_chat(sender_bare)
+            response = await chat.send_message(body)
+
+            clean_text = clean_markdown(response.text)
+
+            # Прикрепляем статус "Активен" прямо к итоговому ответу
+            reply = msg.reply(clean_text)
+            reply["chat_state"] = "active"
+            reply.send()
+
+        except Exception as e:
+            logger.error("Ошибка при генерации ответа: %s", e, exc_info=True)
+            err_reply = msg.reply(f"Произошла ошибка при обращении к API: {e}")
+            err_reply["chat_state"] = "active"
+            err_reply.send()
+
+
+def main():
+    xmpp_host = getattr(config, "XMPP_HOST", None)
+    xmpp_port = getattr(config, "XMPP_PORT", 5222)
+
+    bot = GeminiBot(JID, PASSWORD)
+
+    if xmpp_host:
+        bot.connect((xmpp_host, xmpp_port))
+    else:
+        bot.connect()
+
+    bot.loop.run_forever()
 
 
 if __name__ == "__main__":
-  xmpp = GeminiXmppBot(config.JID, config.PASSWORD)
-
-  # Регистрируем нужные XEP-расширения
-  xmpp.register_plugin("xep_0199")  # XMPP Ping (поддержание соединения)
-  xmpp.register_plugin("xep_0085")  # Уведомления о состоянии чата (печатает...)
-
-  if xmpp.connect():
-    loop = asyncio.get_event_loop()
     try:
-      loop.run_forever()
+        main()
     except KeyboardInterrupt:
-      logging.info("Остановка бота по команде (Ctrl+C)...")
-      xmpp.disconnect()
-  else:
-    logging.error("Не удалось подключиться к XMPP серверу.")
+        logger.info("Остановка бота вручную...")
+        sys.exit(0)
